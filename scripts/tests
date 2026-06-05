@@ -367,6 +367,138 @@ run_tests() {
     queue_test test_unknown_option
 
     ###############################################################################
+    # Multi-sandbox (--name) Tests
+    #
+    # These exercise CLI parsing and the `list` subcommand without actually
+    # building a named sandbox (sudo-free). End-to-end isolation tests would
+    # need to provision a real account and are out of scope for this runner.
+    ###############################################################################
+
+    test_help_lists_name_option() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"--name NAME"* ]]; then
+            pass "--help documents --name"
+        else
+            fail "--help documents --name" "--name in help" "$output"
+        fi
+    }
+    queue_test test_help_lists_name_option
+
+    test_help_lists_list_command() {
+        local output
+        output=$(sv_cmd --help 2>&1)
+        if [[ "$output" == *"l, list"* ]]; then
+            pass "--help documents list command"
+        else
+            fail "--help documents list command" "list command in help" "$output"
+        fi
+    }
+    queue_test test_help_lists_list_command
+
+    test_name_rejects_empty() {
+        local output status
+        set +e
+        output=$("${SV_CMD[@]}" --no-build --name '' build 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"--name"*"non-empty"* ]]; then
+            pass "--name rejects empty value"
+        else
+            fail "--name rejects empty value" "non-zero exit with empty error" "$status | $output"
+        fi
+    }
+    queue_test test_name_rejects_empty
+
+    test_name_rejects_invalid_chars() {
+        local output status
+        set +e
+        output=$("${SV_CMD[@]}" --no-build --name 'bad name' build 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"--name must contain only"* ]]; then
+            pass "--name rejects whitespace / special chars"
+        else
+            fail "--name rejects whitespace / special chars" "non-zero exit with charset error" "$status | $output"
+        fi
+    }
+    queue_test test_name_rejects_invalid_chars
+
+    test_name_rejects_overlong() {
+        local long_name output status
+        long_name="$(printf 'a%.0s' {1..17})"
+        set +e
+        output=$("${SV_CMD[@]}" --no-build --name "$long_name" build 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"16 characters or fewer"* ]]; then
+            pass "--name rejects names longer than 16 chars"
+        else
+            fail "--name rejects names longer than 16 chars" "non-zero exit with length error" "$status | $output"
+        fi
+    }
+    queue_test test_name_rejects_overlong
+
+    test_name_accepts_max_length() {
+        local long_name output status
+        long_name="$(printf 'a%.0s' {1..16})"
+        set +e
+        # --no-build + no install marker for that name will fail later, but
+        # the --name validator must accept it; assert the error is NOT the
+        # length/charset error.
+        output=$("${SV_CMD[@]}" --no-build --name "$long_name" build 2>&1)
+        status=$?
+        set -e
+        if [[ "$output" != *"--name must contain only"* && "$output" != *"--name must be"* ]]; then
+            pass "--name accepts 16-char name"
+        else
+            fail "--name accepts 16-char name" "no validator error" "$status | $output"
+        fi
+    }
+    queue_test test_name_accepts_max_length
+
+    test_list_command_runs() {
+        local output status
+        set +e
+        output=$("${SV_CMD[@]}" --no-build list 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 && "$output" == *"Sandboxes for"* ]]; then
+            pass "list command runs without build"
+        else
+            fail "list command runs without build" "exit 0 with 'Sandboxes for' header" "$status | $output"
+        fi
+    }
+    queue_test test_list_command_runs
+
+    test_nested_name_mismatch_rejected() {
+        local output status
+        set +e
+        # Simulate a nested session: parent ran with --name 'foo', child tries --name 'bar'.
+        output=$(SV_SESSION_ID="fake-session-id" SV_SANDBOX_NAME="foo" \
+            "${SV_CMD[@]}" --no-build --name bar shell -- true 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"does not match nested session"* ]]; then
+            pass "nested --name mismatch rejected"
+        else
+            fail "nested --name mismatch rejected" "non-zero exit with nested mismatch error" "$status | $output"
+        fi
+    }
+    queue_test test_nested_name_mismatch_rejected
+
+    test_sv_clone_help_documents_name() {
+        local output
+        output=$("$SCRIPT_DIR/../sv-clone" --help 2>&1)
+        if [[ "$output" == *"--name"* ]]; then
+            pass "sv-clone --help documents --name"
+        else
+            fail "sv-clone --help documents --name" "--name in help" "$output"
+        fi
+    }
+    queue_test test_sv_clone_help_documents_name
+
+    ###############################################################################
     # Umask and Permission Tests
     ###############################################################################
 

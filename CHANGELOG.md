@@ -2,6 +2,14 @@
 
 All notable user-facing changes to SandVault are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Multi-sandbox support via `--name NAME`. Each named sandbox gets its own user, group, shared workspace, sudoers entry, sandbox-exec profile, SSH key, install marker, and session counter — fully isolated from the default and from each other. New `sv list` subcommand enumerates the sandboxes for the current host user. `sv-clone --name NAME` forwards the flag so clones land in the right shared workspace.
+  - Default (no `--name`) behaves identically to previous releases (paths unchanged).
+  - Nested `sv` invocations inherit the parent's sandbox via `SV_SANDBOX_NAME`; mismatched `--name` inside a nested session is rejected.
+  - Name format: up to 16 characters, `[A-Za-z0-9_-]+`.
+
 ## [1.20.0] - 2026-05-11
 
 ### Changed

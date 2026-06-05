@@ -36,6 +36,88 @@ quote_zsh_args() {
     /bin/zsh -fc 'for arg; do printf "%s " "${(q)arg}"; done' -- "$@"
 }
 
+# Maximum length of the --name suffix. macOS username creation is permissive,
+# but `sandvault-<host>-<name>` shows up in sudoers, ACLs, sandbox-exec
+# profiles, and dscl output; capping the suffix keeps things readable and
+# avoids edge cases with very long account names. The host portion is
+# unbounded so the effective cap on the full account name is host-dependent.
+readonly SANDBOX_NAME_MAX_LEN=16
+
+validate_sandbox_name() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        abort "--name requires a non-empty value"
+    fi
+    if [[ ! "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        abort "--name must contain only letters, digits, '-' and '_' (got: $name)"
+    fi
+    if (( ${#name} > SANDBOX_NAME_MAX_LEN )); then
+        abort "--name must be ${SANDBOX_NAME_MAX_LEN} characters or fewer (got ${#name})"
+    fi
+}
+
+# Initialize all per-sandbox identifiers from SANDBOX_NAME. Empty name keeps
+# the historical paths byte-for-byte (backward compat). Marks each value
+# readonly so a later double-call is a hard error.
+init_sandbox_constants() {
+    local suffix=""
+    if [[ -n "$SANDBOX_NAME" ]]; then
+        suffix="-$SANDBOX_NAME"
+    fi
+
+    SANDVAULT_USER="sandvault-$HOST_USER$suffix"
+    SANDVAULT_GROUP="sandvault-$HOST_USER$suffix"
+    SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$suffix"
+    SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
+
+    SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,directory_inherit"
+    SANDVAULT_FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit,only_inherit"
+    SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown"
+
+    SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
+    SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
+    SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
+
+    INSTALL_MARKER="$INSTALL_PRODUCT/install$suffix"
+    SESSION_FILE="$SESSION_DIR/sandvault$suffix.count"
+    ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped$suffix"
+
+    SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault$suffix"
+    SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
+
+    readonly SANDBOX_NAME
+    readonly SANDVAULT_USER SANDVAULT_GROUP SHARED_WORKSPACE SV_PRIVATE_DIR
+    readonly SANDVAULT_DIR_RIGHTS SANDVAULT_FILE_INHERIT_RIGHTS SANDVAULT_FILE_RIGHTS
+    readonly SUDOERS_FILE SUDOERS_BUILD_HOME_SCRIPT_NAME SANDBOX_PROFILE
+    readonly INSTALL_MARKER SESSION_FILE ACL_LEGACY_STRIPPED_MARKER
+    readonly SSH_KEYFILE_PRIV SSH_KEYFILE_PUB
+}
+
+# Enumerate sandboxes by probing /Users/sandvault-<host_user>[-<name>].
+# Uses directory existence rather than dscl so partially-installed sandboxes
+# still show up (and can be cleaned up via uninstall).
+list_sandboxes() {
+    echo "Sandboxes for $HOST_USER:"
+    local default_home="/Users/sandvault-$HOST_USER"
+    local found_any=false
+    if [[ -d "$default_home" ]]; then
+        printf "  %-18s %s\n" "(default)" "sandvault-$HOST_USER"
+        found_any=true
+    fi
+    local home prefix="/Users/sandvault-$HOST_USER-" name
+    shopt -s nullglob
+    for home in /Users/sandvault-"$HOST_USER"-*/; do
+        name="${home#"$prefix"}"
+        name="${name%/}"
+        printf "  %-18s %s\n" "$name" "sandvault-$HOST_USER-$name"
+        found_any=true
+    done
+    shopt -u nullglob
+    if [[ "$found_any" == "false" ]]; then
+        echo "  (none — run 'sv build' or 'sv --name <NAME> build')"
+    fi
+}
+
 git_config_set_if_changed() {
     local file="$1"
     local key="$2"
@@ -127,30 +209,46 @@ fi
 readonly VERSION="1.20.0"
 
 # Re-entrancy detection: if SV_SESSION_ID is already set, we're already in sandvault.
+# Nested sessions inherit the parent's sandbox name via SV_SANDBOX_NAME so
+# nested `sv` invocations stay in the same named sandbox. Fresh sessions
+# start with SANDBOX_NAME empty; --name may set it during arg parsing.
 NESTED=false
+SANDBOX_NAME=""
 if [[ -n "${SV_SESSION_ID:-}" ]]; then
     NESTED=true
+    SANDBOX_NAME="${SV_SANDBOX_NAME:-}"
 else
     SV_SESSION_ID="$(/usr/bin/uuidgen)"
 fi
 readonly NESTED
 readonly SV_SESSION_ID
 
-# Each user on the computer can have their own sandvault.
-# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
+# Each user on the computer can have their own sandvault. With named
+# sandboxes, USER inside the sandbox is sandvault-<host>-<name>; strip the
+# optional name suffix after the prefix to recover the host user. For
+# fresh sessions SANDBOX_NAME is empty here and USER is never a hyphenated
+# sandvault- name, so the strip is a no-op.
 if [[ "$USER" == sandvault-* ]]; then
     HOST_USER="${USER#sandvault-}"
+    if [[ -n "$SANDBOX_NAME" ]]; then
+        HOST_USER="${HOST_USER%-$SANDBOX_NAME}"
+    fi
 else
     HOST_USER="$USER"
 fi
 readonly HOST_USER
-readonly SANDVAULT_USER="sandvault-$HOST_USER"
-readonly SANDVAULT_GROUP="sandvault-$HOST_USER"
-readonly SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
+
+# Per-sandbox identifiers. Empty until init_sandbox_constants() runs after
+# arg parsing — that's when --name has settled and we know the suffix to
+# apply. The init function marks each readonly once assigned, so calling
+# it twice is a programming error and will fail loudly.
+SANDVAULT_USER=""
+SANDVAULT_GROUP=""
+SHARED_WORKSPACE=""
 # Sandvault-private subdir of $SHARED_WORKSPACE. Holds setup scripts, scratch
 # state, deploy keys, and agentsview symlinks — anything sandvault manages on
 # behalf of the host. Uninstall is `rm -rf` of this directory.
-readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
+SV_PRIVATE_DIR=""
 # Three ACEs for the dir/file split. The split exists so new files don't
 # inherit `search`/`list` (which on a file means execute) from their parent
 # directory's ACL.
@@ -166,25 +264,27 @@ readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 #
 # Each file carries one ACE: SANDVAULT_FILE_RIGHTS (no inherit flags, no
 # execute) — the actual rights for the file.
-readonly SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,directory_inherit"
-readonly SANDVAULT_FILE_INHERIT_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,file_inherit,directory_inherit,only_inherit"
-readonly SANDVAULT_FILE_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown"
+SANDVAULT_DIR_RIGHTS=""
+SANDVAULT_FILE_INHERIT_RIGHTS=""
+SANDVAULT_FILE_RIGHTS=""
 
-# Create sudoers.d file for passwordless sudo to sandvault user
-readonly SUDOERS_FILE="/etc/sudoers.d/50-nopasswd-for-$SANDVAULT_USER"
-readonly SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
+# Sudoers + sandbox-exec profile (per-sandbox).
+SUDOERS_FILE=""
+SUDOERS_BUILD_HOME_SCRIPT_NAME=""
+SANDBOX_PROFILE=""
 
 # Installation marker file
 readonly INSTALL_ORG="$HOME/.config/codeofhonor"
 readonly INSTALL_PRODUCT="$INSTALL_ORG/sandvault"
-readonly INSTALL_MARKER="$INSTALL_PRODUCT/install"
+INSTALL_MARKER=""
 
-# Session tracking for safe multi-instance cleanup
+# Session tracking for safe multi-instance cleanup. SESSION_DIR is shared
+# across all named sandboxes (one $HOME/.local/state/sandvault per host
+# user); SESSION_FILE and the legacy-ACL marker are per-sandbox so their
+# counts and one-shot migrations stay independent.
 readonly SESSION_DIR="$HOME/.local/state/sandvault"
-readonly SESSION_FILE="$SESSION_DIR/sandvault.count"
-# One-shot migration markers. Each marker means "this migration already
-# ran on this host"; presence skips the migration on subsequent runs.
-readonly ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped"
+SESSION_FILE=""
+ACL_LEGACY_STRIPPED_MARKER=""
 
 # Browser state (per-instance using session ID). Used by both Chrome and
 # Lightpanda backends; CHROME_DATA_DIR is Chrome-only.
@@ -203,12 +303,8 @@ IOS_BRIDGE_SCRATCH_DIR=""
 IOS_SIM_UDID=""
 
 readonly SSH_DIR="$HOME/.ssh"
-readonly SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault"
-readonly SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
-
-# Sandbox profile to restrict /Volumes access (external drives)
-# Stored in /var/sandvault/ so sandvault user cannot modify it
-readonly SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
+SSH_KEYFILE_PRIV=""
+SSH_KEYFILE_PUB=""
 
 
 ###############################################################################
@@ -918,6 +1014,9 @@ show_help() {
     echo "Options:"
     echo "  -s, --ssh            Connect via SSH [default: use account impersonation]"
     echo "  -r, --rebuild        Rebuild configuration and file permissions/ACLs"
+    echo "      --name NAME      Operate on a named sandbox (sandvault-\$USER-NAME);"
+    echo "                       omit to use the default sandbox. Affects build, run,"
+    echo "                       and uninstall. Up to ${SANDBOX_NAME_MAX_LEN} chars, [A-Za-z0-9_-]."
     echo "  -v, --verbose        Enable verbose output"
     echo "  -vv / -vvv           More verbose / even more verbose"
     echo "  -h, --help           Show this help message"
@@ -942,6 +1041,7 @@ show_help() {
     echo "  s, shell   [PATH]    Open shell in sandvault"
     echo "  b, build             Build sandvault"
     echo "  u, uninstall         Remove sandvault; keep shared files"
+    echo "  l, list              List all sandboxes for the current user"
     echo ""
     echo "Arguments after -- are passed to the command (claude, codex, opencode, gemini, shell)"
     echo ""
@@ -981,6 +1081,20 @@ while [[ $# -gt 0 ]]; do
         -r|--rebuild)
             REBUILD=true
             shift
+            ;;
+        --name)
+            if [[ $# -lt 2 ]]; then
+                abort "--name requires a value"
+            fi
+            validate_sandbox_name "$2"
+            # Inside a nested session SANDBOX_NAME is locked to whatever the
+            # parent set via SV_SANDBOX_NAME; reject mismatches loudly because
+            # we cannot actually switch users mid-flight (no sudo).
+            if [[ "$NESTED" == "true" && "$2" != "${SV_SANDBOX_NAME:-}" ]]; then
+                abort "--name '$2' does not match nested session's sandbox '${SV_SANDBOX_NAME:-<default>}'; cannot change sandbox inside sandvault"
+            fi
+            SANDBOX_NAME="$2"
+            shift 2
             ;;
         -v|--verbose)
             ((SV_VERBOSE++)) || true
@@ -1053,6 +1167,11 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${NEW_ARGS[@]:-}"
 
+# Resolve all per-sandbox identifiers now that --name (if any) has been
+# parsed. Must happen before any command branch that touches per-sandbox
+# state (uninstall, list, build, run).
+init_sandbox_constants
+
 # Parse fixed arguments
 case "${1:-}" in
     cl|claude)
@@ -1086,6 +1205,10 @@ case "${1:-}" in
             abort "--no-build set: refusing to uninstall"
         fi
         uninstall
+        exit 0
+        ;;
+    l|list)
+        list_sandboxes
         exit 0
         ;;
     *)
@@ -1951,6 +2074,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
+            "SV_SANDBOX_NAME=$SANDBOX_NAME" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -1994,6 +2118,7 @@ else
             "INITIAL_DIR=$INITIAL_DIR" \
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
+            "SV_SANDBOX_NAME=$SANDBOX_NAME" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \

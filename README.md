@@ -96,6 +96,38 @@ Install via git:
 ```
 
 
+## Named Sandboxes
+
+A single host user can run multiple, fully isolated sandboxes. Each named sandbox has its own user account, home directory, shared workspace, sudoers entry, SSH key, and `sandbox-exec` profile. The default (unnamed) sandbox behaves exactly as before.
+
+```bash
+# Build and run a named sandbox
+  sv --name work build
+  sv --name work claude
+  sv --name scratch shell
+
+# List all sandboxes for the current user
+  sv list
+# Sandboxes for $USER:
+#   (default)          sandvault-$USER
+#   work               sandvault-$USER-work
+#   scratch            sandvault-$USER-scratch
+
+# Uninstall just one named sandbox
+  sv --name scratch uninstall
+
+# sv-clone forwards --name so the clone lands in the right shared workspace
+  sv-clone --name work https://github.com/org/repo -- claude
+```
+
+Notes:
+
+- Name format: up to 16 characters, `[A-Za-z0-9_-]+`. The cap keeps `sandvault-$USER-NAME` short enough for sudoers, ACLs, and `dscl` output.
+- Inside a sandbox, nested `sv` calls inherit the parent's name via the `SV_SANDBOX_NAME` env var — `sv shell` from within a `--name work` session stays in `work`. Passing a different `--name` while nested is rejected.
+- To make one shell pin a particular sandbox, set `export SANDVAULT_ARGS="--name work"`.
+- Browser (`--browser`) and iOS Simulator (`--ios`) state is per-session (via `SV_SESSION_ID`), so they work the same way inside any named sandbox.
+
+
 ## Connect via SSH
 
 The default mode for sandvault runs commands as a limited user (basically `sudo -u sandbox-$USER COMMAND`). Sandvault also configures the limited sandvault account so that you can run commands via SSH (basically `ssh sandbox-$USER@$HOSTNAME`), and everything works the same. Use the `-s` or `--ssh` option to use SSH mode with `sv`, or use `tmux` or `screen` for users so inclined.
