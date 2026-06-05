@@ -1998,7 +1998,13 @@ ZSH_COMMAND="export TMPDIR=\$(mktemp -d); cd ~"
 if [[ "$NESTED" == "false" ]]; then
     ZSH_COMMAND="$ZSH_COMMAND; ~/configure"
 fi
-ZSH_COMMAND="$ZSH_COMMAND; source ~/.zshenv; source ~/.zprofile; source ~/.zshrc"
+# Only .zprofile needs explicit sourcing: every zsh auto-sources .zshenv,
+# and the final interactive `/bin/zsh -i` auto-sources .zshrc. .zprofile is
+# normally only sourced for *login* shells, which neither the wrapping
+# `zsh -c` nor the inner `zsh -i` is — so we source it once, here.
+# For piped/agent paths the inner shell is non-interactive (or replaced by
+# the agent binary) so .zshrc isn't loaded, which is the right behavior.
+ZSH_COMMAND="$ZSH_COMMAND; source ~/.zprofile"
 
 if [[ "$COMMAND" != "" ]]; then
     # Agent command (sv claude -- optional arguments here): exec it under zsh
