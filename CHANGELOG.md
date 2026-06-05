@@ -9,6 +9,8 @@ All notable user-facing changes to SandVault are documented in this file.
   - Nested `sv` invocations inherit the parent's sandbox via `SV_SANDBOX_NAME`; mismatched `--name` inside a nested session is rejected.
   - Name format: up to 16 characters, `[A-Za-z0-9_-]+`. `default` is reserved.
 
+- Personal overlay at `~/.config/sandvault/overlay/`. `home/` is rsync'd over every sandbox's home directory during build; `setup/` is copied into `$SHARED_WORKSPACE/_sandvault/setup/` so install scripts run on session start. Auto-detected — no flag, no behavior change when the dir is absent.
+
 ### Changed
 - **BREAKING**: Sandbox identifiers no longer include the host username. The default sandbox is now `sv-default` (was `sandvault-$USER`); named sandboxes are `sv-NAME` (was `sandvault-$USER-NAME`). Shared workspace is `/Users/Shared/sv-default` or `/Users/Shared/sv-NAME` (was `/Users/Shared/sv-$USER[-NAME]`). All cascading paths — sudoers, sandbox profile, SSH key, install marker, session counter — follow the same `sv-LABEL` convention.
   - On a multi-user Mac, two host users running `sv build` now collide on the same `sv-default` account. Use `--name` per host user if isolation between them matters.

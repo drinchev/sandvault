@@ -297,6 +297,16 @@ readonly SSH_DIR="$HOME/.ssh"
 SSH_KEYFILE_PRIV=""
 SSH_KEYFILE_PUB=""
 
+# Host-side overlay applied to every sandbox during build. Lets you keep
+# personal configs out of the repo while still propagating them to every
+# (current after --rebuild, future automatically) sandbox.
+#
+#   $HOST_OVERLAY_DIR/home/   → rsync'd over /Users/sv-<label>/ (sandbox home)
+#   $HOST_OVERLAY_DIR/setup/  → copied into $SV_PRIVATE_DIR/setup/
+#
+# Auto-detected: if the dir is absent, no overlay is applied.
+readonly HOST_OVERLAY_DIR="$HOME/.config/sandvault/overlay"
+
 
 ###############################################################################
 # Functions
@@ -1580,6 +1590,27 @@ if [[ -n "\$_changed" ]]; then
     echo "\$_changed" | tr '\n' '\0' \
         | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
 fi
+
+# Host-side overlay: anything under \$HOST_OVERLAY_DIR/home/ lands on top of
+# the repo template. Same rsync flags so unchanged files don't get rewritten
+# and only changed paths get chowned to the sandbox user.
+if [[ -d "$HOST_OVERLAY_DIR/home" ]]; then
+    _overlay_changed=\$(/usr/bin/rsync \
+        --itemize-changes \
+        --out-format="%n" \
+        --links \
+        --copy-unsafe-links \
+        --checksum \
+        --recursive \
+        --perms \
+        --times \
+        "$HOST_OVERLAY_DIR/home/." \
+        ".")
+    if [[ -n "\$_overlay_changed" ]]; then
+        echo "\$_overlay_changed" | tr '\n' '\0' \
+            | xargs -0 sudo /usr/sbin/chown "$SANDVAULT_USER:$SANDVAULT_GROUP"
+    fi
+fi
 EOF
     sudo mkdir -p "$(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME")"
     trace "Setting $(dirname "$SUDOERS_BUILD_HOME_SCRIPT_NAME") to 0755 (world-traversable)"
@@ -1772,6 +1803,23 @@ JSON_EOF
 fi
 SETUP_EOF
     chmod +x "$SV_PRIVATE_DIR/setup/claude-json"
+
+    # Host-side overlay setup scripts: anything executable under
+    # $HOST_OVERLAY_DIR/setup/ is copied into $SV_PRIVATE_DIR/setup/ and
+    # picked up by the configure script at session start. Built-in setup/
+    # scripts above are written first, so overlay scripts with conflicting
+    # names overwrite them — intentional, so users can replace defaults.
+    if [[ -d "$HOST_OVERLAY_DIR/setup" ]]; then
+        trace "Copying overlay setup scripts from $HOST_OVERLAY_DIR/setup/"
+        /usr/bin/rsync \
+            --quiet \
+            --checksum \
+            --recursive \
+            --perms \
+            --times \
+            "$HOST_OVERLAY_DIR/setup/" \
+            "$SV_PRIVATE_DIR/setup/"
+    fi
 fi
 
 

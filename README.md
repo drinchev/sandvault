@@ -417,6 +417,37 @@ sudo chmod -R o+rX /opt/homebrew
 ```
 
 
+## Personal Overlay (`~/.config/sandvault/overlay/`)
+
+A host-side overlay applied to **every** sandbox during build — current ones after `sv --rebuild`, future ones automatically. Lets you keep personal configs out of the repo while still propagating them everywhere.
+
+```
+~/.config/sandvault/overlay/
+├── home/         # rsync'd over /Users/sv-<label>/ (sandbox home)
+│   ├── .zshrc
+│   ├── .config/
+│   └── bin/my-tool
+└── setup/        # copied into $SHARED_WORKSPACE/_sandvault/setup/
+    └── install-my-tools
+```
+
+- **`home/`** files go straight into the sandbox home directory after the repo template is applied. Anything `rsync` accepts — dotfiles, subdirs, executable scripts.
+- **`setup/`** holds idempotent install scripts that the bundled `configure` runs on session start. Guard them with a marker file so they only do work once:
+
+  ```sh
+  #!/bin/bash
+  set -Eeuo pipefail
+  MARKER="$HOME/.install-my-tools.done"
+  [[ -f "$MARKER" ]] && exit 0
+  brew install fzf jq tree
+  touch "$MARKER"
+  ```
+
+- Auto-detected: if `~/.config/sandvault/overlay/` doesn't exist, nothing changes.
+- Apply to existing sandboxes: `sv --rebuild build` (default) or `sv --name NAME --rebuild build` (each named one).
+- Overlay files with the same name as a built-in setup script (e.g. `setup/gitconfig`) **replace** the default — intentional, so you can override.
+
+
 ## Custom Shell Configuration
 
 If you're using `sandvault`, you're probably the type of person who also sets custom shell configuration files, and you'd be disappointed if you had to use default zsh while running `sv shell`. Here's how to configure your custom configuration for sandvault:
