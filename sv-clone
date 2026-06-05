@@ -137,23 +137,13 @@ fi
 ###############################################################################
 # Determine user and workspace paths
 ###############################################################################
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-    # Inside a named sandbox, USER is sandvault-<host>-<name>; strip the
-    # suffix using the inherited SANDBOX_NAME (from --name or SV_SANDBOX_NAME).
-    if [[ -n "$SANDBOX_NAME" ]]; then
-        HOST_USER="${HOST_USER%-$SANDBOX_NAME}"
-    fi
-else
-    HOST_USER="$USER"
-fi
+# Inside a sandbox USER is sv-default/sv-NAME and tells us nothing about
+# the host user; the parent propagates SV_HOST_USER. Fresh invocations run
+# as the host user, so $USER is correct.
+HOST_USER="${SV_HOST_USER:-$USER}"
 readonly HOST_USER
 readonly SANDBOX_NAME
-SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER"
-if [[ -n "$SANDBOX_NAME" ]]; then
-    SHARED_WORKSPACE="$SHARED_WORKSPACE-$SANDBOX_NAME"
-fi
-readonly SHARED_WORKSPACE
+readonly SHARED_WORKSPACE="/Users/Shared/sv-${SANDBOX_NAME:-default}"
 readonly SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 
 if [[ ! -d "$SHARED_WORKSPACE" ]]; then

@@ -54,20 +54,21 @@ validate_sandbox_name() {
     if (( ${#name} > SANDBOX_NAME_MAX_LEN )); then
         abort "--name must be ${SANDBOX_NAME_MAX_LEN} characters or fewer (got ${#name})"
     fi
+    # 'default' is reserved for the unnamed sandbox (which maps to sv-default).
+    if [[ "$name" == "default" ]]; then
+        abort "--name 'default' is reserved; omit --name to target the default sandbox"
+    fi
 }
 
-# Initialize all per-sandbox identifiers from SANDBOX_NAME. Empty name keeps
-# the historical paths byte-for-byte (backward compat). Marks each value
-# readonly so a later double-call is a hard error.
+# Initialize all per-sandbox identifiers from SANDBOX_NAME. Unnamed sandboxes
+# use the literal label 'default'. Marks each value readonly so a later
+# double-call is a hard error.
 init_sandbox_constants() {
-    local suffix=""
-    if [[ -n "$SANDBOX_NAME" ]]; then
-        suffix="-$SANDBOX_NAME"
-    fi
+    local label="${SANDBOX_NAME:-default}"
 
-    SANDVAULT_USER="sandvault-$HOST_USER$suffix"
-    SANDVAULT_GROUP="sandvault-$HOST_USER$suffix"
-    SHARED_WORKSPACE="/Users/Shared/sv-$HOST_USER$suffix"
+    SANDVAULT_USER="sv-$label"
+    SANDVAULT_GROUP="sv-$label"
+    SHARED_WORKSPACE="/Users/Shared/sv-$label"
     SV_PRIVATE_DIR="$SHARED_WORKSPACE/_sandvault"
 
     SANDVAULT_DIR_RIGHTS="group:$SANDVAULT_GROUP allow read,write,append,delete,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity,writesecurity,chown,search,list,directory_inherit"
@@ -78,11 +79,11 @@ init_sandbox_constants() {
     SUDOERS_BUILD_HOME_SCRIPT_NAME="/var/sandvault/buildhome-$SANDVAULT_USER"
     SANDBOX_PROFILE="/var/sandvault/sandbox-$SANDVAULT_USER.sb"
 
-    INSTALL_MARKER="$INSTALL_PRODUCT/install$suffix"
-    SESSION_FILE="$SESSION_DIR/sandvault$suffix.count"
-    ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped$suffix"
+    INSTALL_MARKER="$INSTALL_PRODUCT/install-$label"
+    SESSION_FILE="$SESSION_DIR/sv-$label.count"
+    ACL_LEGACY_STRIPPED_MARKER="$SESSION_DIR/acl-legacy-stripped-$label"
 
-    SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sandvault$suffix"
+    SSH_KEYFILE_PRIV="$SSH_DIR/id_ed25519_sv-$label"
     SSH_KEYFILE_PUB="$SSH_KEYFILE_PRIV.pub"
 
     readonly SANDBOX_NAME
@@ -93,23 +94,21 @@ init_sandbox_constants() {
     readonly SSH_KEYFILE_PRIV SSH_KEYFILE_PUB
 }
 
-# Enumerate sandboxes by probing /Users/sandvault-<host_user>[-<name>].
-# Uses directory existence rather than dscl so partially-installed sandboxes
-# still show up (and can be cleaned up via uninstall).
+# Enumerate sandboxes by probing /Users/sv-*. Uses directory existence
+# rather than dscl so partially-installed sandboxes still show up (and can
+# be cleaned up via uninstall).
 list_sandboxes() {
-    echo "Sandboxes for $HOST_USER:"
-    local default_home="/Users/sandvault-$HOST_USER"
-    local found_any=false
-    if [[ -d "$default_home" ]]; then
-        printf "  %-18s %s\n" "(default)" "sandvault-$HOST_USER"
-        found_any=true
-    fi
-    local home prefix="/Users/sandvault-$HOST_USER-" name
+    echo "Sandboxes:"
+    local home name found_any=false
     shopt -s nullglob
-    for home in /Users/sandvault-"$HOST_USER"-*/; do
-        name="${home#"$prefix"}"
+    for home in /Users/sv-*/; do
+        name="${home#/Users/sv-}"
         name="${name%/}"
-        printf "  %-18s %s\n" "$name" "sandvault-$HOST_USER-$name"
+        if [[ "$name" == "default" ]]; then
+            printf "  %-18s %s\n" "(default)" "sv-default"
+        else
+            printf "  %-18s %s\n" "$name" "sv-$name"
+        fi
         found_any=true
     done
     shopt -u nullglob
@@ -223,19 +222,11 @@ fi
 readonly NESTED
 readonly SV_SESSION_ID
 
-# Each user on the computer can have their own sandvault. With named
-# sandboxes, USER inside the sandbox is sandvault-<host>-<name>; strip the
-# optional name suffix after the prefix to recover the host user. For
-# fresh sessions SANDBOX_NAME is empty here and USER is never a hyphenated
-# sandvault- name, so the strip is a no-op.
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-    if [[ -n "$SANDBOX_NAME" ]]; then
-        HOST_USER="${HOST_USER%-$SANDBOX_NAME}"
-    fi
-else
-    HOST_USER="$USER"
-fi
+# HOST_USER is the host-side account that owns this sandvault session.
+# Inside a sandbox USER is sv-default/sv-NAME and tells us nothing about
+# the host, so the parent propagates SV_HOST_USER explicitly. Fresh
+# (non-nested) invocations run as the host user, so $USER is correct.
+HOST_USER="${SV_HOST_USER:-$USER}"
 readonly HOST_USER
 
 # Per-sandbox identifiers. Empty until init_sandbox_constants() runs after
@@ -1014,9 +1005,10 @@ show_help() {
     echo "Options:"
     echo "  -s, --ssh            Connect via SSH [default: use account impersonation]"
     echo "  -r, --rebuild        Rebuild configuration and file permissions/ACLs"
-    echo "      --name NAME      Operate on a named sandbox (sandvault-\$USER-NAME);"
-    echo "                       omit to use the default sandbox. Affects build, run,"
-    echo "                       and uninstall. Up to ${SANDBOX_NAME_MAX_LEN} chars, [A-Za-z0-9_-]."
+    echo "      --name NAME      Operate on a named sandbox (sv-NAME);"
+    echo "                       omit to use sv-default. Affects build, run,"
+    echo "                       and uninstall. Up to ${SANDBOX_NAME_MAX_LEN} chars, [A-Za-z0-9_-],"
+    echo "                       except 'default' which is reserved."
     echo "  -v, --verbose        Enable verbose output"
     echo "  -vv / -vvv           More verbose / even more verbose"
     echo "  -h, --help           Show this help message"
@@ -2075,6 +2067,7 @@ if [[ "$MODE" == "ssh" ]]; then
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_SANDBOX_NAME=$SANDBOX_NAME" \
+            "SV_HOST_USER=$HOST_USER" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -2119,6 +2112,7 @@ else
             "SHARED_WORKSPACE=$SHARED_WORKSPACE" \
             "SV_SESSION_ID=$SV_SESSION_ID" \
             "SV_SANDBOX_NAME=$SANDBOX_NAME" \
+            "SV_HOST_USER=$HOST_USER" \
             "SV_VERBOSE=$SV_VERBOSE" \
             "VERBOSE=${VERBOSE:-}" \
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \

@@ -98,34 +98,50 @@ Install via git:
 
 ## Named Sandboxes
 
-A single host user can run multiple, fully isolated sandboxes. Each named sandbox has its own user account, home directory, shared workspace, sudoers entry, SSH key, and `sandbox-exec` profile. The default (unnamed) sandbox behaves exactly as before.
+`sv` supports multiple, fully isolated sandboxes. Each one has its own user account, home directory, shared workspace, sudoers entry, SSH key, and `sandbox-exec` profile. The unnamed sandbox is `sv-default`; named ones are `sv-NAME`.
 
 ```bash
-# Build and run a named sandbox
+# Default sandbox: sv-default
+  sv build
+  sv claude
+
+# Named sandbox: sv-work
   sv --name work build
   sv --name work claude
   sv --name scratch shell
 
-# List all sandboxes for the current user
+# List all sandboxes on the machine
   sv list
-# Sandboxes for $USER:
-#   (default)          sandvault-$USER
-#   work               sandvault-$USER-work
-#   scratch            sandvault-$USER-scratch
+# Sandboxes:
+#   (default)          sv-default
+#   work               sv-work
+#   scratch            sv-scratch
 
-# Uninstall just one named sandbox
+# Uninstall just one sandbox
   sv --name scratch uninstall
 
 # sv-clone forwards --name so the clone lands in the right shared workspace
   sv-clone --name work https://github.com/org/repo -- claude
 ```
 
+Paths per sandbox:
+
+| Resource          | Path                                                        |
+|-------------------|-------------------------------------------------------------|
+| macOS user/group  | `sv-default` / `sv-NAME`                                    |
+| Home directory    | `/Users/sv-default` / `/Users/sv-NAME`                      |
+| Shared workspace  | `/Users/Shared/sv-default` / `/Users/Shared/sv-NAME`        |
+| Sudoers           | `/etc/sudoers.d/50-nopasswd-for-sv-{default,NAME}`          |
+| Sandbox profile   | `/var/sandvault/sandbox-sv-{default,NAME}.sb`               |
+| SSH key           | `~/.ssh/id_ed25519_sv-{default,NAME}`                       |
+
 Notes:
 
-- Name format: up to 16 characters, `[A-Za-z0-9_-]+`. The cap keeps `sandvault-$USER-NAME` short enough for sudoers, ACLs, and `dscl` output.
+- Name format: up to 16 characters, `[A-Za-z0-9_-]+`. `default` is reserved.
 - Inside a sandbox, nested `sv` calls inherit the parent's name via the `SV_SANDBOX_NAME` env var — `sv shell` from within a `--name work` session stays in `work`. Passing a different `--name` while nested is rejected.
 - To make one shell pin a particular sandbox, set `export SANDVAULT_ARGS="--name work"`.
 - Browser (`--browser`) and iOS Simulator (`--ios`) state is per-session (via `SV_SESSION_ID`), so they work the same way inside any named sandbox.
+- Sandbox identifiers no longer include the host user. On a Mac shared between multiple human accounts, two host users running `sv build` will both land on `sv-default` (same dscl account, same shared workspace). If that matters, use distinct `--name` values per host user.
 
 
 ## Connect via SSH

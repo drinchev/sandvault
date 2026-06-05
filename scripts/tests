@@ -10,15 +10,12 @@ SV_BASE="$SCRIPT_DIR/../sv"
 # Prevent user's SANDVAULT_ARGS from interfering with test expectations.
 unset SANDVAULT_ARGS
 
-# Each user on the computer can have their own sandvault.
-# Inside sandvault, USER will be sandvault-<name>, where name is the host-users's name.
-if [[ "$USER" == sandvault-* ]]; then
-    HOST_USER="${USER#sandvault-}"
-else
-    HOST_USER="$USER"
-fi
+# Sandboxes are identified by --name (sv-default for the unnamed default,
+# sv-NAME for named). Inside a sandbox, the parent propagates the host
+# user via SV_HOST_USER; tests usually run as the host user directly.
+HOST_USER="${SV_HOST_USER:-$USER}"
 HOST_HOME="$(dscl . -read "/Users/$HOST_USER" NFSHomeDirectory | cut -d' ' -f2)"
-SANDVAULT_USER="sandvault-$HOST_USER"
+SANDVAULT_USER="sv-default"
 SANDVAULT_HOME="/Users/$SANDVAULT_USER"
 
 [[ "${VERBOSE:-0}" =~ ^[0-9]+$ ]] && VERBOSE="${VERBOSE:-0}" || VERBOSE=1
@@ -463,13 +460,27 @@ run_tests() {
         output=$("${SV_CMD[@]}" --no-build list 2>&1)
         status=$?
         set -e
-        if [[ "$status" -eq 0 && "$output" == *"Sandboxes for"* ]]; then
+        if [[ "$status" -eq 0 && "$output" == *"Sandboxes:"* ]]; then
             pass "list command runs without build"
         else
-            fail "list command runs without build" "exit 0 with 'Sandboxes for' header" "$status | $output"
+            fail "list command runs without build" "exit 0 with 'Sandboxes:' header" "$status | $output"
         fi
     }
     queue_test test_list_command_runs
+
+    test_name_rejects_reserved_default() {
+        local output status
+        set +e
+        output=$("${SV_CMD[@]}" --no-build --name default build 2>&1)
+        status=$?
+        set -e
+        if [[ "$status" -ne 0 && "$output" == *"'default' is reserved"* ]]; then
+            pass "--name rejects reserved word 'default'"
+        else
+            fail "--name rejects reserved word 'default'" "non-zero exit with reserved-word error" "$status | $output"
+        fi
+    }
+    queue_test test_name_rejects_reserved_default
 
     test_nested_name_mismatch_rejected() {
         local output status
